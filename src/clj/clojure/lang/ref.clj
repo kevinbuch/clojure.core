@@ -5,7 +5,7 @@
             [clojure.lang.exceptions :refer [new-illegal-state-error]]
             [clojure.lang.protocols  :refer [IComparable IDeref IMeta IReference
                                              IValidatable IWatchable]]
-            [clojure.lang.stm        :as stm]
+            [clojure.lang.stm        :refer [IRef new-tval set-prior set-next] :as stm]
             [clojure.next            :refer :all :exclude [cons]]))
 
 (def ^:private MIN-HISTORY 0)
@@ -29,6 +29,7 @@
               ^:volatile-mutable -watches
               ^:volatile-mutable -min-history
               ^:volatile-mutable -max-history
+              ^:volatile-mutable -tvals
               lock]
 
   IHistory
@@ -54,6 +55,10 @@
 
   IMeta
   (-meta [this] -meta)
+
+  IRef
+  (set-tval [this new-tval]
+    (set! -tvals new-tval))
 
   IReference
   (-reset-meta! [this new-meta]
@@ -96,4 +101,5 @@
     watches
     (or min-history MIN-HISTORY)
     (or max-history MAX-HISTORY)
+    (new-tval state 0)
     nil))

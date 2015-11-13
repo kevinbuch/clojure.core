@@ -14,6 +14,35 @@
                                              new-countdown-latch latch-countdown]]
             [clojure.next            :refer :all :exclude [cons]]))
 
+(defprotocol ITval
+  (set-val   [this new-val])
+  (set-point [this new-point])
+  (set-prior [this new-prior])
+  (set-next  [this new-next]))
+
+(deftype Tval [^:unsynchronized-mutable val
+              ^:unsynchronized-mutable point
+              ^:unsynchronized-mutable prior
+              ^:unsynchronized-mutable next]
+  ITval
+  (set-val [this new-val] (set! val new-val))
+  (set-point [this new-point] (set! point new-point))
+  (set-prior [this new-prior] (set! prior new-prior))
+  (set-next [this new-next] (set! next new-next)))
+
+(defn new-tval
+  ([val point]
+   (let [tval (Tval. val point nil nil)]
+     (set-prior tval tval)
+     (set-next tval tval)))
+  ([val point prior]
+   (let [tval (Tval. val point prior (.next prior))]
+    (set-next prior tval)
+    (set-prior (.next tval) tval))))
+
+(defprotocol IRef
+  (set-tval [this new-tva]))
+
 (def ^{:private true} RUNNING 0)
 (def ^{:private true} COMMITTING 1)
 (def ^{:private true} RETRY 2)
@@ -26,15 +55,13 @@
 (def ^{:private true} transaction (local-state))
 
 ; TO DO
-(defn point [tvals])
 (defn validate [ref validator entries])
 (defn histcount [ref])
-(defn new-tval [])
 (defn get-faults [ref])
-(defn get-max-history [ref])
-(defn get-min-history [ref])
-(defn get-next [tvals])
-(defn get-watches [ref])
+
+(defn notify-watches [ref old-val new-val]
+  (doseq [watch (._watches ref)]
+    (watch old-val new-val)))
 
 (defprotocol IInfo
   (running? [this]))
@@ -139,13 +166,13 @@
                   (release-if-ensured this ref)
                   (try-write-lock this ref)
                   (swap! locked #(conj % ref))
-                  (when (and was-ensured (.tvals ref) (> (point (.tvals ref)) read-point))
+                  (when (and was-ensured (.tval ref) (> (.point (.tval ref)) read-point))
                     (throw (new-retry-exception))))
                 (let [refinfo '(tinfo ref)]
                   (when (and refinfo (not= refinfo info) (running? refinfo))
                     (when-not (barge this refinfo)
                       (throw (new-retry-exception)))))
-                (let [val (when-let [tval (.tvals ref)] (val tval))]
+                (let [val (when-let [tval (.tval ref)] (.val tval))]
                   (-set-vals vals (assoc vals ref val)))
                 (doseq [f fns]
                   (-set-vals vals (assoc vals ref (apply (get vals ref) (:args f)))))))
@@ -156,20 +183,20 @@
               (validate ref (get-validator ref) entry))
             (let [commit-point (get-and-increment-atomic-counter last-point)]
               (doseq [[ref entry] vals]
-                (let [oldval (when-let [tval (.tvals ref)] (val tval))
+                (let [oldval (when-let [tval (.tval ref)] (.val tval))
                       hcount (histcount ref)]
                   (cond
-                    (not (.tvals ref))
-                    (set! (.tvals ref) (new-tval entry commit-point))
-                    (or (and (pos? (get-faults ref)) (< hcount (get-max-history ref)))
-                        (< hcount (get-min-history ref)))
-                    (set! (.tvals ref) (new-tval entry commit-point (.tvals ref)))
+                    (not (.tval ref))
+                    (set! (.tval ref) (new-tval entry commit-point))
+                    (or (and (pos? (get-faults ref)) (< hcount (._max-history ref)))
+                        (< hcount (._min-history ref)))
+                    (set-tval ref (new-tval entry commit-point (.tval ref)))
                     :else
                     (do
-                      (set! (.tvals ref) (get-next (.tvals ref)))
-                      (set! (.val (.tvals ref)) entry)
-                      (set! (.point (.tvals ref)) commit-point)))
-                  (when (seq (get-watches ref))
+                      (set-tval ref (.next (.tval ref)))
+                      (set-val (.tval ref) entry)
+                      (set-point (.tval ref) commit-point)))
+                  (when (seq (._watches ref))
                     (swap! notifies #(conj % (new-notify ref oldval entry)))))))
             (reset! done true)
             (set! (.status info) COMMITTED))
